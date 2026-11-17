@@ -11,6 +11,7 @@ from a claim table checked against the data, and each caveat sits in an amber "R
 ## View the slides
 
 - **Online:** https://pradyumna-chacham.github.io/gespmm-talk/
+- **Previous 38-slide version (for comparison):** https://pradyumna-chacham.github.io/gespmm-talk/v4/ (PDF: `v4/slides.pdf`)
 - **PDF:** [`slides.pdf`](slides.pdf) (same slides, one page each)
 - **Locally:** `python3 -m http.server 8000` in this folder, then open http://localhost:8000
 
