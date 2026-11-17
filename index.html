@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GE-SpMM Retuned — CSC 548 Project Talk</title>
+<link rel="stylesheet" href="vendor/reveal/reset.css">
+<link rel="stylesheet" href="vendor/reveal/reveal.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="assets/theme.css">
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ============================================================ 1 TITLE -->
+<section class="title-slide">
+  <p class="eyebrow">CSC 548 · Parallel Systems · Final Project</p>
+  <h1 class="ctitle">GE-SpMM Retuned</h1>
+  <p class="csub">Re-building a 2020 GPU kernel for sparse matrix multiplication, and re-tuning it for a 2025 GPU</p>
+  <p class="cmeta">Pradyumna Chacham &amp; Dilip Kumar<br>Fall 2026</p>
+  <div class="pills"><span class="pill">Reproduce a paper</span><span class="pill blue">Make it faster</span><span class="pill gray">CUDA · OpenMP · NCSU ARC</span></div>
+  <aside class="notes">[0:00 to 0:10] Hi, we are Pradyumna and Dilip. We took a GPU kernel from a 2020 paper, rebuilt it, tested it on a 2025 GPU, and then made it faster. The project is much bigger than four minutes, so I will show the setup, two findings and the results. The rest is in the report.</aside>
+</section>
+
+<!-- ============================================================ 2 PROBLEM -->
+<section>
+  <p class="kicker">The problem, from first principles</p>
+  <h2 class="title">Multiply a sparse matrix by a dense matrix</h2>
+  <div class="cols w46">
+    <div class="defs">
+      <div class="d"><span class="t">Sparse matrix:</span> almost all entries are zero, so we store only the nonzeros. <b>CSR</b> (Compressed Sparse Row) stores each row’s column numbers and values back to back.</div>
+      <div class="d"><span class="t">SpMV</span> (sparse matrix × vector): <span class="mono">y = A·x</span>. This was our kernel in HW1–HW4.</div>
+      <div class="d"><span class="t">SpMM</span> (sparse matrix × dense matrix): <span class="mono">C = A·B</span>, where B has <b>N</b> columns, N = 16 to 512.</div>
+      <div class="d"><span class="t">Why it matters:</span> one layer of a <b>graph neural network (GNN)</b> is an SpMM. Each node adds up its neighbours’ feature vectors. A is the graph, B holds one feature vector (length N) per node.</div>
+    </div>
+    <div>
+      <svg class="diag" viewBox="0 0 640 330" style="width:100%;height:auto" role="img" aria-label="Row i of A has nonzeros in columns j, m and n. These select rows j, m and n of B, which are scaled and added to give row i of C.">
+        <text x="0" y="18" class="h">A: one row (sparse)</text>
+        <text x="248" y="18" class="h">B: K × N (dense)</text>
+        <text x="476" y="18" class="h">C: row i</text>
+        <g stroke="#9aa3b2" stroke-width="1" fill="#ffffff">
+          <rect x="0" y="140" width="24" height="26"/><rect x="24" y="140" width="24" height="26" fill="#dbe6fd" stroke="#2563eb"/><rect x="48" y="140" width="24" height="26"/><rect x="72" y="140" width="24" height="26"/>
+          <rect x="96" y="140" width="24" height="26" fill="#dbe6fd" stroke="#2563eb"/><rect x="120" y="140" width="24" height="26"/><rect x="144" y="140" width="24" height="26" fill="#dbe6fd" stroke="#2563eb"/><rect x="168" y="140" width="24" height="26"/>
+        </g>
+        <text x="36" y="186" text-anchor="middle" style="fill:#2563eb;font-weight:700">j</text>
+        <text x="108" y="186" text-anchor="middle" style="fill:#2563eb;font-weight:700">m</text>
+        <text x="156" y="186" text-anchor="middle" style="fill:#2563eb;font-weight:700">n</text>
+        <text x="0" y="212" class="m">3 nonzeros; the rest are zero</text>
+        <text x="207" y="160" text-anchor="middle" style="font-size:24px">×</text>
+        <g stroke="#9aa3b2" stroke-width="1">
+          <rect x="248" y="34" width="190" height="230" fill="#ffffff"/>
+          <rect x="248" y="62" width="190" height="26" fill="#dbe6fd" stroke="#2563eb"/>
+          <rect x="248" y="140" width="190" height="26" fill="#dbe6fd" stroke="#2563eb"/>
+          <rect x="248" y="206" width="190" height="26" fill="#dbe6fd" stroke="#2563eb"/>
+        </g>
+        <text x="242" y="80" text-anchor="end" style="fill:#2563eb;font-weight:700">j</text>
+        <text x="242" y="158" text-anchor="end" style="fill:#2563eb;font-weight:700">m</text>
+        <text x="242" y="224" text-anchor="end" style="fill:#2563eb;font-weight:700">n</text>
+        <text x="343" y="284" text-anchor="middle" class="m">N columns (one feature vector per row)</text>
+        <text x="452" y="160" text-anchor="middle" style="font-size:24px">=</text>
+        <rect x="476" y="140" width="160" height="26" fill="#dbe6fd" stroke="#2563eb"/>
+        <text x="0" y="318" style="font-size:14px">C[i, :] = a(i,j)·B[j, :] + a(i,m)·B[m, :] + a(i,n)·B[n, :]</text>
+      </svg>
+      <p class="cap">Which rows of B we read depends on the graph, so memory access is irregular. That is the whole difficulty.</p>
+    </div>
+  </div>
+  <div class="callout"><span class="clbl">Key idea</span>SpMM is like N SpMVs that share the same A. Reading A <b>once</b> for all N columns is where the speed comes from.</div>
+  <aside class="notes">[0:10 to 0:35] All semester we did SpMV: a sparse matrix times one vector. SpMM is the same, but the vector becomes a dense matrix B with N columns. This is the main step of a graph neural network: every node adds up its neighbours' feature vectors. A is the graph, B holds the features. The hard part is that which rows of B we read depends on the graph, so memory access is irregular.</aside>
+</section>
+
+<!-- ============================================================ 3 HOMEWORKS -->
+<section>
+  <p class="kicker">What we carried over from HW1–HW3 and the midterm</p>
+  <h2 class="title">Four lessons from the homeworks, used again here</h2>
+  <div class="cols c4">
+    <div class="card"><span class="lbl">HW3 · CUDA</span><span class="ct">One warp per row</span>
+      <span class="cx">A <b>warp</b> is a group of 32 GPU threads that run the same instruction together. HW3’s vector kernel gave each row one warp.</span>
+      <span class="to">The paper’s starting kernel does the same, with the 32 threads spread across B’s columns.</span></div>
+    <div class="card"><span class="lbl">HW2 · OpenMP</span><span class="ct">Balance nonzeros, not rows</span>
+      <span class="cx">Giving each thread an equal number of <b>nonzeros</b> was 32–41% faster than equal rows on uneven matrices.</span>
+      <span class="to">Our merge-path GPU kernel does this for warps (Finding 2).</span></div>
+    <div class="card"><span class="lbl">HW1–HW3 · Roofline</span><span class="ct">Memory is the limit</span>
+      <span class="cx">SpMV does about 0.17 math operations per byte it reads, so it waits on memory, not on arithmetic.</span>
+      <span class="to">SpMM does more work per byte, but is still limited by memory.</span></div>
+    <div class="card"><span class="lbl">Midterm · GEMM</span><span class="ct">Keep reused data close</span>
+      <span class="cx">Tiling copied blocks of a matrix into fast cache so each value was read from memory once.</span>
+      <span class="to">The paper’s first trick copies a piece of the sparse row into fast on-chip memory.</span></div>
+  </div>
+  <div class="callout"><span class="clbl">One more from HW3</span>How <b>uneven the row lengths</b> are (roadNet-CA vs pkustk14) decided which SpMV kernel won. It decides which SpMM kernel wins too.</div>
+  <aside class="notes">[0:35 to 1:00] Four things from the homeworks carry straight over. From HW3, one warp per row: a warp is 32 GPU threads that move together, and that is exactly how the paper's kernel starts. From HW2, balancing nonzeros instead of rows, which becomes our merge-path kernel. From the roofline in HW1 to HW3: SpMV is limited by memory, and so is SpMM. And from the midterm, tiling: keep reused data in fast memory, which is the paper's first trick.</aside>
+</section>
+
+<!-- ============================================================ 4 PAPER + SETUP -->
+<section>
+  <p class="kicker">The paper we reproduced</p>
+  <h2 class="title">GE-SpMM (Huang et al., SC 2020): two tricks on top of CSR</h2>
+  <p class="lead">Start: one warp per sparse row; thread j of the warp computes output column j. Then:</p>
+  <div class="cols">
+    <div class="card"><span class="lbl">Trick 1 · CRC</span><span class="ct">Coalesced Row Caching</span>
+      <span class="cx">Without it, all 32 threads read the <b>same</b> nonzero, one at a time. With it, the warp reads 32 nonzeros in <b>one combined (“coalesced”) read</b>, puts them in shared memory (fast memory on the chip), and every thread reuses them.</span></div>
+    <div class="card"><span class="lbl">Trick 2 · CWM</span><span class="ct">Coarse-grained Warp Merging</span>
+      <span class="cx">One warp computes <b>CF</b> groups of 32 columns instead of one, so the sparse row is read once and used CF times. CF is the <b>coarsening factor</b>; the paper always uses CF = 2.</span></div>
+  </div>
+  <div class="tiles">
+    <div class="tile"><div class="tl">GPU</div><div class="tv">RTX 5060 Ti</div><div class="td">2025 · 36 SMs · 448 GB/s</div></div>
+    <div class="tile"><div class="tl">Software</div><div class="tv">CUDA 12.9</div><div class="td">on NCSU ARC nodes</div></div>
+    <div class="tile"><div class="tl">Inputs</div><div class="tv">118 matrices</div><div class="td">real graphs + generated ones</div></div>
+    <div class="tile"><div class="tl">Widths</div><div class="tv">N = 16 to 512</div><div class="td">typical GNN feature sizes</div></div>
+    <div class="tile"><div class="tl">Checked</div><div class="tv">≈78,000 runs</div><div class="td">0 wrong answers</div></div>
+  </div>
+  <div class="callout blue"><span class="clbl">Our question</span>The paper’s GPUs had 2.75–4 MB of <b>L2 cache</b> (the large cache shared by the whole GPU). Ours has <b>32 MB</b>. Do the two tricks still help, and on which matrices?</div>
+  <aside class="notes">[1:00 to 1:25] The paper adds two tricks to the one-warp-per-row kernel. Trick one, row caching: instead of 32 threads reading the same nonzero, the warp reads 32 of them in one combined read and shares them. Trick two, warp merging: one warp does two groups of columns, so the sparse row is read once and used twice. We rebuilt both on a 2025 GPU and tested 118 matrices at six widths, about 78 thousand checked runs. The question: the new GPU has about ten times the cache. Do the tricks still help?</aside>
+</section>
+
+<!-- ============================================================ 5 FINDING 1 -->
+<section>
+  <p class="kicker">Finding 1</p>
+  <h2 class="title">On a 2025 GPU, the paper’s fixed settings no longer win</h2>
+  <p class="lead">Baseline to beat: <b>cuSPARSE</b>, NVIDIA’s own sparse library. We time every method it offers and keep the best one. 1.0× means the same speed.</p>
+  <div class="cols w55">
+    <div class="stack">
+      <div class="stat"><span class="num">0.95×</span><span class="sl">Paper’s kernel (CF = 2) vs the best cuSPARSE method, N = 512</span><span class="ss">The paper reported 1.37–1.43× on its 2016–2018 GPUs.</span></div>
+      <div class="stat"><span class="num">1.40× slower</span><span class="sl">Trick 1 (CRC) vs the paper’s own simple kernel</span><span class="ss">It reads 25% fewer bytes but runs 62% more instructions. The big cache already catches the repeated reads that CRC was built to remove.</span></div>
+    </div>
+    <div>
+      <p class="chart-h">Best CF over all 705 (matrix, N) pairs</p>
+      <div class="bars">
+        <div class="brow"><span class="blab">CF 1</span><div class="btrack"><div class="bfill" style="width:330px"></div><span class="bval">378</span></div></div>
+        <div class="brow"><span class="blab">CF 2</span><div class="btrack"><div class="bfill gray" style="width:277px"></div><span class="bval">317 <span>(paper’s choice)</span></span></div></div>
+        <div class="brow"><span class="blab">CF 4</span><div class="btrack"><div class="bfill gray" style="width:6px"></div><span class="bval">7</span></div></div>
+        <div class="brow"><span class="blab">CF 8</span><div class="btrack"><div class="bfill gray" style="width:3px"></div><span class="bval">3</span></div></div>
+      </div>
+      <div class="callout"><span class="clbl">What we did</span>Choose the settings <b>per matrix</b> (CF, warps per block, floats per load, threads per row): <b>1.81×</b> faster than the paper’s fixed settings.</div>
+    </div>
+  </div>
+  <p class="src">0.95× and 1.40×: our October run (104 matrices; 17 profiled with Nsight Compute). Other numbers: November run (118 matrices).</p>
+  <aside class="notes">[1:25 to 1:55] First finding: the paper's kernel with its fixed settings is now slightly slower than NVIDIA's library, 0.95 times, where the paper reported about 1.4 times faster. Profiling shows why: row caching cuts bytes read by a quarter but adds 62 percent more instructions, and the large cache already does that job. The best coarsening factor is usually 1, not the paper's 2. So we tune the settings for each matrix, which gives 1.8 times over the fixed settings.</aside>
+</section>
+
+<!-- ============================================================ 6 FINDING 2 -->
+<section class="f2">
+  <p class="kicker">Finding 2</p>
+  <h2 class="title">Uneven graphs need work split by nonzeros, not by rows</h2>
+  <div class="hwtag"><span class="hwpill">HW2 → GPU</span><span class="hwtxt">In real graphs a few rows are huge. With one warp per row, the whole kernel waits for the warp with the longest row. In HW2 we fixed this on the CPU by giving each thread an equal number of nonzeros. <b>Merge path</b> (Merrill &amp; Garland, SC 2016) does the same for GPU warps.</span></div>
+  <img class="fig" src="assets/img/f24b_wikitalk.png" alt="Warp timelines on wiki-Talk at N = 128. Left, one warp per row: most SMs finish by about 2,300 microseconds, but one warp runs to 14,800 microseconds. Right, merge path: all SMs finish together at about 8,500 microseconds." style="width:880px;height:225px">
+  <p class="cap">Each line is one warp on one <b>SM</b> (streaming multiprocessor, one of the GPU’s 36 cores). Time axis in µs. Orange = the slowest warp. Graph: wiki-Talk, N = 128.</p>
+  <div class="stats" style="margin-top:10px">
+    <div class="stat"><span class="num">14.8 ms</span><span class="sl">One warp per row</span><span class="ss">85% of the run is a tail with most SMs idle. One row has 100,022 nonzeros.</span></div>
+    <div class="stat blue"><span class="num">8.5 ms</span><span class="sl">Merge path</span><span class="ss">No tail. Rows split across warps are added in a fixed order, so the answer is identical every run.</span></div>
+    <div class="stat blue"><span class="num">1.72×</span><span class="sl">Merge path vs best row kernel</span><span class="ss">59 uneven matrices, N = 16 (uneven: spread of row lengths ≥ 2× the mean).</span></div>
+  </div>
+  <aside class="notes">[1:55 to 2:30] Second finding, and this one comes straight from HW2. Real graphs have a few giant rows. With one warp per row, everyone waits for the warp that got the giant row. On the left, one row of 100 thousand nonzeros keeps the kernel running to 14.8 milliseconds while most of the GPU is idle. Merge path cuts the work into equal pieces of rows plus nonzeros, like the nonzero split in HW2. On the right everything finishes together at 8.5 milliseconds, and we add the split rows in a fixed order so the answer is the same every run.</aside>
+</section>
+
+<!-- ============================================================ 7 RESULTS -->
+<section class="results">
+  <p class="kicker">Results</p>
+  <h2 class="title">Faster than NVIDIA’s library on almost every matrix</h2>
+  <div class="stats">
+    <div class="stat"><span class="num">1.58×</span><span class="sl">vs best cuSPARSE, N = 512</span><span class="ss">Faster on 110 of 115 matrices (2 ties, 3 slower).</span></div>
+    <div class="stat"><span class="num">1.51×</span><span class="sl">vs best cuSPARSE, N = 16</span><span class="ss">Small N: pack 2–4 rows into one warp, plus merge path.</span></div>
+    <div class="stat"><span class="num">1.14×</span><span class="sl">With settings picked by a simple rule</span><span class="ss">vs best cuSPARSE on 27 matrices the rule never saw. Picking costs 0.2 ms, once per graph.</span></div>
+    <div class="stat blue"><span class="num">4.8×</span><span class="sl">GPU vs our best CPU code, N = 512</span><span class="ss">16-core AMD EPYC, OpenMP + AVX-512. Our CPU code is faster than Intel MKL (MKL: 0.77×).</span></div>
+    <div class="stat blue"><span class="num">2.06×</span><span class="sl">Training a 2-layer GCN</span><span class="ss">Graph convolutional network, time per epoch, vs PyTorch’s built-in sparse multiply.</span></div>
+    <div class="stat blue"><span class="num">6.75×</span><span class="sl">Max instead of sum (GraphSAGE)</span><span class="ss">vs PyTorch’s scatter method, using about 10× less memory.</span></div>
+  </div>
+  <p class="src">× = speed ratio, averaged over matrices with the geometric mean (the right average for ratios). Per-matrix plots and confidence intervals are in the report.</p>
+  <aside class="notes">[2:30 to 3:05] Results over 118 matrices. Against the best cuSPARSE method we are 1.58 times faster at width 512 and win on 110 of 115 matrices; 1.5 times at width 16. A simple, explainable rule picks the settings for a new graph and still beats cuSPARSE on matrices it never saw. The GPU is 4.8 times faster than our best CPU code, and that CPU code itself beats Intel MKL. Inside PyTorch, training a small graph network is about two times faster.</aside>
+</section>
+
+<!-- ============================================================ 8 ROOFLINE -->
+<section>
+  <p class="kicker">Roofline</p>
+  <h2 class="title">Why the gains are modest: SpMM is still limited by memory</h2>
+  <div class="cols w46">
+    <div>
+      <img class="fig" src="assets/img/roofline.png" alt="Roofline plot. Measured kernels sit between 0.4 and 4 flops per DRAM byte, under the 448 GB/s memory line and far left of where compute becomes the limit." style="width:470px;height:369px">
+      <p class="cap">Each dot is one measured run (Nsight Compute). Dashed line: the most any kernel can do at 448 GB/s.</p>
+    </div>
+    <div>
+      <ul class="blist">
+        <li><b>Arithmetic intensity</b> = math operations done per byte read from memory. SpMV in HW1–HW3: 0.17. Our SpMM: median <b>1.22</b>.</li>
+        <li>The GPU can do about 24 trillion operations per second but read only 448 GB/s. A kernel needs about <b>50 operations per byte</b> before arithmetic becomes the limit. We are far below that, so memory is the limit.</li>
+        <li>Achieved memory speed: median 238 GB/s, best <b>423 GB/s = 94%</b> of the maximum.</li>
+        <li>Most common reason a warp stalls: waiting for a memory load.</li>
+      </ul>
+      <div class="callout"><span class="clbl">Same lesson as HW1–HW3</span>Every speed-up came from <b>reading fewer bytes</b> or <b>keeping more of the GPU busy</b>, never from doing less math.</div>
+    </div>
+  </div>
+  <aside class="notes">[3:05 to 3:30] Why not ten times faster? The roofline. Arithmetic intensity is math per byte read. SpMV was 0.17; SpMM is about 1.2. The GPU needs about 50 operations per byte before math becomes the limit, so we are firmly limited by memory, and our best runs reach 94 percent of peak memory speed. Same lesson as the homeworks: all our gains came from moving fewer bytes or keeping the GPU busy.</aside>
+</section>
+
+<!-- ============================================================ 9 TAKEAWAYS -->
+<section>
+  <p class="kicker">Wrap-up</p>
+  <h2 class="title">Three takeaways</h2>
+  <div class="takes">
+    <div class="take"><span class="n">1</span><span class="tx"><b>Running a paper’s code is not reproducing it.</b> Settings that won in 2020 lose on a 2025 GPU; tuning per matrix brings back a 1.58× lead.</span></div>
+    <div class="take"><span class="n">2</span><span class="tx"><b>Load balance matters on the GPU, just as in HW2.</b> Splitting work by nonzeros removes the long-row tail.</span></div>
+    <div class="take"><span class="n">3</span><span class="tx"><b>SpMM stays limited by memory.</b> Optimize bytes moved and busy SMs, not math.</span></div>
+  </div>
+  <div class="callout blue"><span class="clbl">Not in this talk: see the report and the explainer page</span>8 hypotheses we tested (4 were not supported) · the CPU version (OpenMP + AVX-512 vs Intel MKL) · a model that predicts memory traffic from the matrix alone · half precision, energy, five GPU generations.<br>
+    Explainer: <a href="https://claude.ai/artifact/NLRUhB9CXgQftoqFZyJ1Q5">GE-SpMM Retuned explainer</a> · Slides and figures: <a href="https://github.com/Pradyumna-Chacham/gespmm-talk">github.com/Pradyumna-Chacham/gespmm-talk</a></div>
+  <p class="eyebrow" style="margin-top:16px">Thank you · Questions?</p>
+  <aside class="notes">[3:30 to 3:50] Three takeaways. Re-running a paper is not reproducing it: the 2020 settings lose on new hardware, and tuning brings back the lead. Load balance matters on the GPU just as it did in HW2. And SpMM is limited by memory, so the work is about bytes, not math. Much more is in the report and the explainer page. Thank you.</aside>
+</section>
+
+<!-- ============================================================ BACKUP A -->
+<section>
+  <p class="kicker">Backup · for questions</p>
+  <h2 class="title">The hypotheses we tested</h2>
+  <table class="tbl">
+    <tr><th style="width:6%">#</th><th style="width:48%">Hypothesis</th><th>What the data said</th></tr>
+    <tr><td>H1</td><td>Trick 1 (CRC) pays off only for long rows</td><td><span class="no">Not supported</span>: correlation 0.35–0.56 (needed &gt; 0.8)</td></tr>
+    <tr><td>H2</td><td>The best CF falls as row lengths get more uneven</td><td><span class="no">Not supported</span>: CF 1 is best everywhere at N ≥ 64</td></tr>
+    <tr><td>H3</td><td>Uneven rows hurt the GPU more than the CPU</td><td><span class="yes">Supported</span>; merge path closes 35–71% of the gap</td></tr>
+    <tr><td>H4</td><td>The GPU’s lead over the CPU grows with N</td><td><span class="yes">Supported</span>: 1.9× at N = 16 → 4.8× at N = 512</td></tr>
+    <tr><td>H5</td><td>Node order still matters on a big-cache GPU</td><td><span class="part">Partly</span>: random order 0.88×, other orders ≈ 1.0× (October run)</td></tr>
+    <tr><td>H6</td><td>Merge path beats row split on uneven graphs at every N</td><td><span class="no">Not supported</span>: 1.72× at N = 16, but 0.94× at N = 512</td></tr>
+    <tr><td>H7</td><td>There is an unevenness level where merge path takes over</td><td><span class="yes">Yes</span>: around a spread of 4× the mean row length (median)</td></tr>
+    <tr><td>H8</td><td>Grouping rows by length (binning) gets half of merge path’s gain</td><td><span class="no">Not supported</span>: it gets 0.32 of it</td></tr>
+  </table>
+  <p class="src">“Spread” = coefficient of variation (CoV): standard deviation of row lengths divided by their mean.</p>
+  <aside class="notes">Backup for Q and A. We wrote eight hypotheses before the big runs. Four were not supported, which is a result in itself: for example, the best coarsening factor does not depend on skew, it is simply 1 at most widths.</aside>
+</section>
+
+<!-- ============================================================ BACKUP B -->
+<section>
+  <p class="kicker">Backup · terms</p>
+  <h2 class="title">Terms used in this talk</h2>
+  <table class="tbl">
+    <tr><th style="width:22%">Term</th><th>Meaning</th></tr>
+    <tr><td>CSR</td><td>Compressed Sparse Row: stores each row’s nonzeros (column number + value) back to back, plus where each row starts</td></tr>
+    <tr><td>SpMV / SpMM</td><td>Sparse matrix × vector / sparse matrix × dense matrix</td></tr>
+    <tr><td>GNN, GCN</td><td>Graph neural network; graph convolutional network (a common GNN)</td></tr>
+    <tr><td>Warp</td><td>32 GPU threads that run the same instruction together</td></tr>
+    <tr><td>SM</td><td>Streaming multiprocessor: one GPU core that runs many warps (36 on our GPU)</td></tr>
+    <tr><td>Shared memory, L2 cache</td><td>Small fast memory inside each SM; larger cache shared by all SMs (32 MB here)</td></tr>
+    <tr><td>Coalesced read</td><td>The 32 threads of a warp read neighbouring addresses, so the GPU serves them in one memory request</td></tr>
+    <tr><td>CRC, CWM, CF</td><td>The paper’s tricks: Coalesced Row Caching; Coarse-grained Warp Merging; CF = coarsening factor</td></tr>
+    <tr><td>cuSPARSE, MKL</td><td>NVIDIA’s GPU sparse library; Intel’s Math Kernel Library for CPUs</td></tr>
+    <tr><td>Merge path</td><td>Split the work into equal pieces of (rows + nonzeros) instead of whole rows</td></tr>
+    <tr><td>Arithmetic intensity</td><td>Math operations per byte read from memory; the x-axis of a roofline plot</td></tr>
+  </table>
+  <aside class="notes">Backup: definitions of every short form used in the talk.</aside>
+</section>
+
+</div>
+</div>
+<div class="deck-footer"><span class="tag">CSC 548</span> · GE-SpMM Retuned · Chacham &amp; Kumar</div>
+<script src="vendor/reveal/reveal.js"></script>
+<script src="vendor/reveal/plugin/notes/notes.js"></script>
+<script>
+  Reveal.initialize({
+    width: 1280, height: 720, margin: 0, minScale: 0.2, maxScale: 2.0,
+    center: false, hash: true, slideNumber: 'c/t', transition: 'fade', transitionSpeed: 'fast',
+    controls: true, progress: true, pdfSeparateFragments: false,
+    plugins: [ RevealNotes ]
+  });
+</script>
+</body>
+</html>
