@@ -87,4 +87,3 @@ D-xxx numbers refer to our decision log. The RTX 2080 SUPER comparison is comput
 **Backup**
 
 - B1. Terms (every short form) (slide 37)
-- B2. Paper vs ours, full table (slide 38)
