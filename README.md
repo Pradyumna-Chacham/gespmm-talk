@@ -1,12 +1,12 @@
 # GE-SpMM Retuned: project talk
 
 Slides for our CSC 548 (Parallel Systems, NC State, Fall 2026) final-project talk.
-Pradyumna Chacham (GPU track) and Dilip Kumar (CPU track).
+Dilip Kumar (GPU track) and Pradyumna Chacham (CPU track).
 
-The talk is 4 minutes plus 30 seconds of questions. The deck has 24 main slides plus 2 backup slides.
-Eleven of the main slides are spoken (about 3:50, see `SCRIPT.md`); the others are clicked past and stay in
-the deck and the PDF as reference. Dense slides are split into consecutive parts titled "(1/2)", "(2/2)" or
-"(1/3)" to "(3/3)", so the page count (38) is larger than the slide count (26).
+The talk is 4 minutes plus 30 seconds of questions. The deck has 19 slides plus 1 backup slide (Terms), one picture per slide
+(PDF: 20 pages). The script in `SCRIPT.md` is about 3:54 at 150 words per minute. Structure: A the problem (slides 1-4),
+B the paper and our project (5-6), C GPU track (7-13), D CPU track (14-17), E close (18-19). Every number on a slide comes
+from a claim table checked against the data, and each caveat sits in an amber "Read this first" box above its number.
 
 ## View the slides
 
@@ -26,7 +26,7 @@ Keys while presenting: `→` / `←` move, `F` full screen, `S` opens the speake
 | `slides.pdf` | PDF export of the slides (made with `decktape reveal --size 1280x720`) |
 | `assets/theme.css` | The look: red NC State bar, Inter font, red-underlined titles, as in the CSC 548 lectures; also the styles for the reused explainer diagrams (`svg.d`) |
 | `assets/img/` | Figures from our analysis: roofline, wiki-Talk warp timelines, the code-generation figures (`codegen_*.png`), CPU scaling (F9), GPU vs CPU (F8) and the skew study (F33) |
-| `analysis/gen_compare.py` | Script that computes the RTX 2080 SUPER vs RTX 5060 Ti comparison (slides 25–26); its saved output is `analysis/gen_compare_output.txt` |
+| `analysis/gen_compare.py` | Script that computes the RTX 2080 SUPER vs RTX 5060 Ti comparison ; its saved output is `analysis/gen_compare_output.txt` |
 | `vendor/reveal/` | reveal.js 5.1.0 (MIT licence), kept here so the slides work offline |
 
 ## Where the numbers come from
@@ -65,7 +65,7 @@ D-xxx numbers refer to our decision log. The RTX 2080 SUPER comparison is comput
 13. Our method 2: the longest-row problem, from CSR to COO to merge path (slides 20–22)
 14. Our method 3: pick the settings for a new graph automatically (slide 23)
 15. GPU results: faster than NVIDIA's library at every width (slide 24)
-16. Same code, newer GPU: 1.66× faster. What caused it? (slides 25–26)
+16. Same code, newer GPU: 1.66× faster. What caused it? 
 17. Did the newer hardware give us our gain? (slides 27–28)
 
 **Part E: CPU track**
