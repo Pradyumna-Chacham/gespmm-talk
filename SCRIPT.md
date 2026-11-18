@@ -1,83 +1,28 @@
-# Speaker script (3:54)
+# Script (v6, 13 slides, 4:00)
 
-Speaking rate about 150 words per minute. 586 words in total, about 3:54. Timestamps are cumulative. The same lines are in each slide's speaker notes (press S). Caveats are spoken before the numbers they qualify.
+[0:00–0:08] We re-tested a 2020 GPU kernel on today's GPUs, and built its CPU twin. Dilip Kumar covers the GPU track, Pradyumna Chacham the CPU track.
 
-## Slide 1: Title: GE-SpMM Retuned
+[0:08–0:25] SpMM multiplies a sparse matrix by a dense one. It is 30 to 40 percent of graph network training time, per the paper and our proposal, and it is memory-bound: under 3 percent of GPU arithmetic gets used. Our goals: reproduce the paper, find what newer GPUs change, and tune it, on GPU and CPU.
 
-[0:00–0:06] (15 words) We re-tested a 2020 GPU kernel on a 2025 GPU and built its CPU twin.
+[0:25–0:45] From the homeworks: CSR format, and y equals A times x. SpMM is N SpMVs that share the same A. In a graph neural network layer, each node aggregates its neighbours' feature vectors; that is an SpMM.
 
-## Slide 2: SpMM in one picture
+[0:45–1:00] The same kernel appears in recommendation, sparse solvers, and pruned networks. As an illustration: if SpMM is 35 percent of a training step, doubling its speed makes the step about 1.2 times faster.
 
-[0:06–0:17] (28 words) A is the graph, mostly zeros. B is dense, N features per node. Each node sums its neighbours' feature rows: the core of a graph neural network layer.
+[1:00–1:15] GE-SpMM, Huang and colleagues, Supercomputing 2020, works on CSR directly. On a GTX 1080 Ti and an RTX 2080 it beat cuSPARSE's older csrmm2 routine by 1.37 to 1.43 times, using two tricks.
 
-## Slide 3: Roofline: why it's limited by memory
+[1:15–1:30] CRC: a warp loads a chunk of the sparse row once, in one coalesced read, and all its threads share it. That is tiling, from the midterm.
 
-[0:17–0:30] (31 words) The CPU ceilings are our own measurement. Both chips wait on memory: the GPU uses under 3% of its math, the CPU under 10%. Speedups mean fewer bytes or busier workers.
+[1:30–1:45] CWM: one warp computes several column groups, so each loaded nonzero is used several times. That is register blocking. The paper fixes the coarsening factor at 2.
 
-## Slide 4: The two ways time gets wasted
+[1:45–2:10] We reproduced the kernel, fixed a compiler problem, tested five GPU generations, and built the same algorithm on a 16-core CPU. Tuning per graph beats the paper's fixed settings by 1.81 times. Our main addition is merge path: one huge row keeps a warp busy while the GPU waits. It loses on even graphs, so we use it only on uneven rows, where it gains 1.72 times at N = 16.
 
-[0:30–0:38] (21 words) Two ways time is wasted: redundant reads, and uneven rows that leave workers idle. Homeworks one and two showed the second.
+[2:10–2:35] At run time we must choose from the graph alone. A decision tree overfit. kNN handles fine settings but cannot choose merge path. So a fitted skew rule picks the strategy, and kNN the fine settings. Scores are fractions of the best setting, on 27 unseen graphs; about 1 percent is noise. Auto scores 0.873, best cuSPARSE 0.768.
 
-## Slide 5: GE-SpMM (SC 2020), the paper we re-tested
+[2:35–3:05] On Blackwell, the published kernel reached 0.94 times cuSPARSE; our 3-line fix, same settings, 1.14 times. The same code ran 1.66 times faster than on the 2080 SUPER, but cuSPARSE sped up 1.61 times, so our lead is not from the hardware. The 1.3 to 1.6 times headline is an upper bound with every setting tried; automatic choice gives 1.14 times. A GCN epoch is 2.06 times faster than torch.sparse.
 
-[0:38–0:48] (26 words) GE-SpMM, SC 2020, claimed to beat cuSPARSE. Two tricks: share 32 nonzeros through on-chip memory, and give each thread two columns so sparse values are reused.
+[3:05–3:40] We tested each explanation. Did the bigger L2 shrink CRC's benefit? The 4060 Ti has the same L2 and CRC still gains 22 percent, against 8 on the 5060 Ti: L2 size alone does not explain it. Did CRC's overhead win? No, it was the compiler: 8 loads against 68. Does coarsening cost cache? DRAM traffic rises from 158 to 847 megabytes. Does skew hurt GPUs more? Yes: 31 percent kept, against 82 on the CPU.
 
-## Slide 6: Our project: two tracks
+[3:40–3:55] Still hypotheses: the generation gain is mostly cache, and coarsening would pay again if B's slice stayed in L2. Next: lock both GPUs to one clock, try larger coarsening with an L2-sized tile, close the MKL gap at N = 16, and release code by December 7.
 
-[0:48–0:58] (23 words) Two tracks. GPU: re-test the paper on an RTX 5060 Ti, then improve it. CPU: an OpenMP version as baseline. Same 118 matrices.
+[3:55–4:00] Thank you. Questions?
 
-## Slide 7: Re-testing the paper: its code lost, and the compiler was the reason
-
-[0:58–1:16] (45 words) Caveat: older GPUs compile this fine, and we haven't traced why this compiler differs. On the new GPU the published kernel is 0.94 times cuSPARSE: the loop wasn't unrolled, so loads wait. Three source lines fix it, same answers; same settings, our code: 1.14 times.
-
-## Slide 8: Fixed settings stop being best, so tune per graph
-
-[1:16–1:26] (25 words) Fixed settings stop being best, so we tune per graph. Trying every setting beats the paper's by 1.81 times. Row caching helps less; cause unknown.
-
-## Slide 9: Uneven rows: merge path
-
-[1:26–1:44] (46 words) Caveat: splitting costs speed on even graphs and fades at large widths, so we use it only on uneven ones. Give each warp equal nonzeros, not equal rows; answers stay bit-identical. wiki-Talk at width 128: 14.8 down to 8.5 milliseconds. As in homeworks one and two.
-
-## Slide 10: The heuristic: choosing settings for unseen graphs
-
-[1:44–2:02] (44 words) A decision tree memorized its training graphs and lost to the paper's setting. kNN copies similar graphs: fine for fine settings, but can't choose merge path. Our rule: rows uneven past a fitted threshold means merge path. Auto uses kNN for the fine settings.
-
-## Slide 11: Did it generalize? 27 graphs it never saw
-
-[2:02–2:11] (24 words) Caveat: scores are fractions of the best setting per graph, on 27 unseen graphs; 1% is noise. Auto 0.873, rulebook 0.849, best cuSPARSE 0.768.
-
-## Slide 12: GPU results: two honest numbers
-
-[2:11–2:28] (43 words) It depends on whether we may try every setting per graph. If so, 1.3 to 1.6 times the best cuSPARSE depending on width, an upper bound. Choosing automatically on unseen graphs, 1.14 times. Kernel time, one GPU; cuSPARSE still wins some small-width graphs.
-
-## Slide 13: Newer GPU: what made the same code 1.66x faster?
-
-[2:28–2:43] (36 words) Caveat: its clock is 1.44 times higher; we couldn't separate clock from cache. 1.66 times faster; biggest jump, 2.26 times, where data fits only the new cache. cuSPARSE sped up equally, so our lead isn't hardware.
-
-## Slide 14: How a CPU runs SpMM, next to the GPU
-
-[2:43–2:54] (28 words) On the CPU, a core replaces a warp, with 16-float vector instructions. Each core owns whole output rows, so no locks. OpenMP picks the schedule at run time.
-
-## Slide 15: The CPU design: the same two problems, CPU-style fixes
-
-[2:54–3:06] (31 words) Uneven rows: dynamic schedule, so idle cores grab the next rows. Latency: four accumulators overlap adds. Packing short rows gains 12 to 16 percent; cache blocking lost. AVX2 equals AVX-512: memory-bound.
-
-## Slide 16: CPU roofline
-
-[3:06–3:20] (35 words) Caveat: ceilings are our own measurement, and the extra traffic is inferred from timings, as cache-miss counters weren't available. Past width 64, big graphs stall: rows of B are re-read, about four times the minimum.
-
-## Slide 17: CPU results
-
-[3:20–3:35] (36 words) 16 cores give 6.7 times; one core already uses 38% of bandwidth. Our best variant beats MKL from width 32; MKL wins at 16. The GPU is 1.9 to 4.8 times faster, on a different chip.
-
-## Slide 18: Takeaways
-
-[3:35–3:51] (41 words) An old paper's rerun tests the compiler; we haven't traced why it chose differently. Fixed settings don't carry across hardware. Uneven rows hit us three times; one rule decides when to split. Both machines are limited by data movement, not math.
-
-## Slide 19: Next, what we skipped, questions
-
-[3:51–3:54] (8 words) Next, finish the experiments, close MKL's lead. Questions?
-
-## Backup B1: Terms
-
-Not spoken.
